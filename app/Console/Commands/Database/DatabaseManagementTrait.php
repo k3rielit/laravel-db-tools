@@ -47,13 +47,12 @@ trait DatabaseManagementTrait
      */
     public static function getDatabaseSchema(): Collection
     {
-        $tables = static::getTableNames()->mapWithKeys(function (string $table) {
+        return static::getTableNames()->mapWithKeys(function (string $table) {
             $columns = collect(Schema::getColumnListing($table))->mapWithKeys(function (string $column) use ($table) {
                 return [$column => Schema::getColumnType($table, $column)];
             });
             return [$table => $columns];
         });
-        return $tables;
     }
 
     /**
@@ -143,30 +142,89 @@ trait DatabaseManagementTrait
          */
         if (count($allowedSchema) <= 0) {
             error_log("No common schema was found, importing is impossible.");
+            return;
         }
+        $retrySchema = [];
         foreach ($allowedSchema as $tableName => $columns) {
-            // Delete previous data
-            $purgedTable = false;
-            try {
-                $deleted = DB::table($tableName)->delete();
-                $purgedTable = true;
-                error_log("Purged {$deleted} records from `{$tableName}`, inserting new records...");
-            } catch (\Throwable $th) {
-                error_log("Failed to purge table `{$tableName}` (updating the records instead): " . $th->getMessage());
-            }
-            // Insert or update values
-            $method = $purgedTable === true ? 'insert' : 'update';
-            $guessedPrimaryKey = in_array('id', $columns) ? 'id' : (in_array('slug', $columns) ? 'slug' : (in_array('uuid', $columns) ? 'uuid' : (in_array('created_at', $columns) ? 'created_at' : array_key_first($columns))));
+            $method = static::tryPurgingTable($tableName) === true ? 'insert' : 'update';
+            $guessedPrimaryKey = static::guessPrimaryKey($columns);
             error_log("Loading data with method: {$method}(), guessed primary key: {$guessedPrimaryKey}");
             $tableContent = $content['records'][$tableName];
-            foreach ($tableContent as $record) {
-                $query = DB::table($tableName);
-                if ($method === 'update') {
-                    $query->where($guessedPrimaryKey, '=', $record[$guessedPrimaryKey] ?? null);
+
+            /**
+             * First try, if a series of inserts/updates fail, retry them afterward (for ex foreign constraint crashes)
+             */
+            try {
+                foreach ($tableContent as $record) {
+                    static::insertOrUpdateRecord($tableName, $columns, $guessedPrimaryKey, $record, $method);
                 }
-                $query->$method($record);
+            } catch (\Throwable $exception) {
+                error_log("Importing table `{$tableName}` failed, retrying later: " . $exception->getMessage());
+                $retrySchema[$tableName] = $columns;
             }
         }
+
+        /**
+         * Retry importing crashing tables
+         */
+        if (count($retrySchema) <= 0) {
+            error_log("Nothing to retry, skipping step (good).");
+            return;
+        }
+        foreach ($retrySchema as $tableName => $columns) {
+            $method = static::tryPurgingTable($tableName) === true ? 'insert' : 'update';
+            $guessedPrimaryKey = static::guessPrimaryKey($columns);
+            error_log("Retrying table `{$tableName}`, loading data with method: {$method}(), guessed primary key: {$guessedPrimaryKey}");
+            $tableContent = $content['records'][$tableName];
+            try {
+                foreach ($tableContent as $record) {
+                    static::insertOrUpdateRecord($tableName, $columns, $guessedPrimaryKey, $record, $method);
+                }
+            } catch (\Throwable $exception) {
+                error_log("Retrying table `{$tableName}` failed: " . $exception->getMessage());
+            }
+        }
+    }
+
+    /**
+     * Tries purging every record from the table, and returns an insert/update method.
+     */
+    public static function tryPurgingTable(string $table): bool
+    {
+        try {
+            $deleted = DB::table($table)->delete();
+            error_log("Purged {$deleted} records from `{$table}`, inserting new records...");
+            return true;
+        } catch (\Throwable $th) {
+            error_log("Failed to purge table `{$table}` (updating the records instead): " . $th->getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * Very dumb primary key guesser without context.
+     * The guesses are: `id` -> `slug` -> `uuid` -> `created_at` -> `array_key_first($columns)`
+     */
+    public static function guessPrimaryKey(array $columns): string|null
+    {
+        return in_array('id', $columns) ? 'id' : (in_array('slug', $columns) ? 'slug' : (in_array('uuid', $columns) ? 'uuid' : (in_array('created_at', $columns) ? 'created_at' : array_key_first($columns))));
+    }
+
+    public static function insertOrUpdateRecord(string $table, array $columnSchema, string $primaryKey, array $record, string $method): void
+    {
+        // Filter data and insert/update it
+        $filteredRecord = array_filter(
+            $record,
+            function ($key) use ($columnSchema) {
+                return key_exists($key, $columnSchema);
+            },
+            ARRAY_FILTER_USE_KEY
+        );
+        $query = DB::table($table);
+        if ($method === 'update') {
+            $query->where($primaryKey, '=', $filteredRecord[$primaryKey] ?? null);
+        }
+        $query->$method($filteredRecord);
     }
 
 }
