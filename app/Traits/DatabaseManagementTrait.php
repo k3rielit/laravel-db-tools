@@ -44,12 +44,29 @@ trait DatabaseManagementTrait
 
     /**
      * Dumps the tables, columns, and column types into a Collection.
+     * @param array|null $morphMap The morphMap structure: ["table1" => [ "column1" => "column1Renamed", "column2" => "column2Renamed" ] ]
+     * @return Collection A Collection of column - column type items, grouped by table names.
      */
-    public static function getDatabaseSchema(): Collection
+    public static function getDatabaseSchema(array|null $morphMap = null): Collection
     {
-        return static::getTableNames()->mapWithKeys(function (string $table) {
+        return static::getTableNames()->mapWithKeys(function (string $table) use ($morphMap) {
             $columns = collect(Schema::getColumnListing($table))->mapWithKeys(function (string $column) use ($table) {
                 return [$column => Schema::getColumnType($table, $column)];
+            });
+            if(!$morphMap) {
+                return [$table => $columns];
+            }
+            // Get the morph map for the current table
+            $tableMorphMap = $morphMap[$table] ?? null;
+            if(!$tableMorphMap) {
+                return [$table => collect()];
+            }
+            // Morph the schema
+            $columns = $columns->filter(function(string $value, string $key) use ($tableMorphMap) {
+                return key_exists($key, $tableMorphMap);
+            })->mapWithKeys(function (string $value, string $key) use ($tableMorphMap) {
+                $morphedKey = $tableMorphMap[$key] ?? null;
+                return [$morphedKey => $value];
             });
             return [$table => $columns];
         });
@@ -57,12 +74,32 @@ trait DatabaseManagementTrait
 
     /**
      * Returns a Collection of tables, and their respective records.
+     * If the morphMap is defined, and a table doesn't exist, or is empty, no records will be morphed and assigned to it.
+     * @param array|null $morphMap The morphMap structure: ["table1" => [ "column1" => "column1Renamed", "column2" => "column2Renamed" ] ]
+     * @return Collection A Collection of records, grouped by table names.
      */
-    public static function dumpDatabaseRecords(): Collection
+    public static function dumpDatabaseRecords(array|null $morphMap = null): Collection
     {
         $tables = static::getTableNames();
-        return $tables->mapWithKeys(function (string $table) {
-            return [$table => DB::table($table)->get()];
+        return $tables->mapWithKeys(function (string $table) use ($morphMap) {
+            $records = DB::table($table)->get();
+            // If a morph map isn't defined, return the untouched models
+            if(!$morphMap) {
+                return [$table => $records];
+            }
+            // Get the morph map for the current table
+            $tableMorphMap = $morphMap[$table] ?? null;
+            if(!$tableMorphMap) {
+                return [$table => collect()];
+            }
+            // Map each attribute key to its renamed key
+            return [$table => $records->map(function ($record) use ($tableMorphMap) {
+                $renamedAttributes = [];
+                foreach ($record as $key => $value) {
+                    $renamedAttributes[$tableMorphMap[$key] ?? $key] = $value;
+                }
+                return $renamedAttributes;
+            })];
         });
     }
 
@@ -90,15 +127,18 @@ trait DatabaseManagementTrait
     }
 
     /**
-     * Dumps the database schema and all of the records into a single JSON file.
+     * Dumps the database schema and every record into a single JSON file.
      * The file name is the current timestamp.
+     * @param array|null $morphMap The morphMap structure: ["table1" => [ "column1" => "column1Renamed", "column2" => "column2Renamed" ] ]
+     * @return string The created file's absolute path.
      */
-    public static function saveDump(): string
+    public static function saveDump(array|null $morphMap = null): string
     {
         $path = static::getDumpPath();
         $content = json_encode([
-            'schema' => static::getDatabaseSchema(),
-            'records' => static::dumpDatabaseRecords(),
+            'morph' => $morphMap,
+            'schema' => static::getDatabaseSchema($morphMap),
+            'records' => static::dumpDatabaseRecords($morphMap),
         ]);
         file_put_contents($path, [$content]);
         return $path;
