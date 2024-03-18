@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Console\Commands\Database;
+namespace App\Traits;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;

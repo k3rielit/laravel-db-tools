@@ -6,7 +6,7 @@ use Illuminate\Console\Command;
 
 class Export extends Command
 {
-    use DatabaseManagementTrait;
+    use \App\Traits\DatabaseManagementTrait;
 
     protected $signature = 'db:export';
 

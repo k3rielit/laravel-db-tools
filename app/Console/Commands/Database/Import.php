@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\DB;
 
 class Import extends Command
 {
-    use DatabaseManagementTrait;
+    use \App\Traits\DatabaseManagementTrait;
 
     protected $signature = 'db:import';
 
